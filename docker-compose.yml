@@ -1,0 +1,42 @@
+version: "3.8"
+services:
+  api:
+    build: ./api
+    ports:
+      - "8080:8080"
+    environment:
+      - DB_HOST=${DB_HOST}
+      - DB_USER=${DB_USER}
+      - DB_PASSWORD=${DB_PASSWORD}
+      - DB_NAME=${DB_NAME}
+    depends_on:
+      - database
+    volumes:
+      - ./api:/app
+      - ./api/vendor:/app/vendor
+
+  database:
+    image: postgres:13
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: ${DB_USER}
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+      POSTGRES_DB: ${DB_NAME}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./postgres/init.sql:/docker-entrypoint-initdb.d/init.sql
+
+  frontend:
+    build: ./frontend
+    command: ["node", "server.js"]
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./frontend/public:/app/public
+      - /app/node_modules
+    stdin_open: true
+    tty: true 
+  
+volumes:
+  postgres_data:
