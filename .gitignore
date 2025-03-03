@@ -1,0 +1,19 @@
+# Node.js / React の不要ファイル
+frontend/node_modules/
+frontend/.next/
+frontend/.env.local
+
+# Go の不要ファイル
+api/bin/
+api/tmp/
+api/vendor/
+api/.env
+
+# Docker の不要ファイル
+*.log
+docker-data/
+docker-compose.override.yml
+
+# OS の不要ファイル
+.DS_Store
+Thumbs.db
