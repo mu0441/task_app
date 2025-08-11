@@ -3,6 +3,7 @@ module api
 go 1.22.2
 
 require (
+	github.com/golang-jwt/jwt/v5 v5.2.1
 	github.com/labstack/echo/v4 v4.13.3
 	golang.org/x/crypto v0.33.0
 	gorm.io/driver/postgres v1.5.11

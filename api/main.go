@@ -1,169 +1,230 @@
 package main
 
 import (
-    "github.com/labstack/echo/v4"
-    "github.com/labstack/echo/v4/middleware"
-    "gorm.io/driver/postgres"
-    "gorm.io/gorm"
-    "net/http"
-    "time"
 	"fmt"
-    // "github.com/golang-jwt/jwt/v4"
+	"net/http"
+	"os"
+	"time"
+	"strconv"
+
+	"github.com/labstack/echo/v4"
+	"github.com/labstack/echo/v4/middleware"
+	"gorm.io/driver/postgres"
+	"gorm.io/gorm"
+
 	"golang.org/x/crypto/bcrypt"
+	"github.com/golang-jwt/jwt/v5"
 )
 
 var db *gorm.DB
+var jwtSecret []byte
 
 type User struct {
-    ID       uint   `gorm:"primaryKey"`
-    Username string `gorm:"unique"`
-    Password string
+	ID       uint   `gorm:"primaryKey"`
+	Username string `gorm:"uniqueIndex"`
+	Password string
+	CreatedAt time.Time
 }
 
 type Task struct {
-    ID        uint      `gorm:"primaryKey"`
-    Title     string
-    Completed bool
-    UserID    uint
+	ID        uint      `gorm:"primaryKey"`
+	Title     string
+	Completed bool
 	Status    string    `gorm:"default:'todo'"`
-    CreatedAt time.Time
+	UserID    uint      `gorm:"index"`
+	CreatedAt time.Time
+}
+
+// JWTのクレーム
+type Claims struct {
+	UserID uint `json:"uid"`
+	jwt.RegisteredClaims
 }
 
 func main() {
-    e := echo.New()
+	jwtSecret = []byte(os.Getenv("JWT_SECRET"))
+	dsn := fmt.Sprintf(
+		"host=%s user=%s password=%s dbname=%s port=%s sslmode=disable",
+		getenv("DB_HOST", "database"),
+		getenv("DB_USER", "postgres"),
+		getenv("DB_PASSWORD", "yourpassword"),
+		getenv("DB_NAME", "taskapp"),
+		getenv("DB_PORT", "5432"),
+	)
 
-	// // JWTミドルウェア
-    // jwtConfig := middleware.JWTConfig{
-    //     SigningKey:  []byte("secret"),
-    //     TokenLookup: "header:Authorization",
-    //     AuthScheme:  "Bearer",
-    // }
-    // e.Use(middleware.JWTWithConfig(jwtConfig))
-
-    // CORSミドルウェアの設定
-    // e.Use(middleware.CORSWithConfig(middleware.CORSConfig{
-    //     AllowOrigins: []string{"http://localhost:3000"}, // フロントエンドのURLを指定
-    //     AllowMethods: []string{http.MethodGet, http.MethodPost, http.MethodPut, http.MethodDelete},
-    //     AllowHeaders: []string{echo.HeaderContentType},
-    // }))
-
-	e.Use(middleware.CORSWithConfig(middleware.CORSConfig{
-        AllowOrigins: []string{"http://localhost:3000"}, // 許可するオリジン
-        AllowMethods: []string{echo.GET, echo.POST, echo.PUT, echo.PATCH, echo.DELETE},    // 許可するHTTPメソッド
-        AllowHeaders: []string{"Content-Type", "Authorization"},               // 許可するヘッダー
-    }))
-
-	
-    // データベース接続
-    var err error
-    dsn := "host=database user=postgres password=yourpassword dbname=taskapp port=5432 sslmode=disable"
-    db, err = gorm.Open(postgres.Open(dsn), &gorm.Config{})
-    if err != nil {
-        panic("Failed to connect to database")
-    }
-
-    // マイグレーション
-    db.AutoMigrate(&User{}, &Task{})
+	var err error
+	db, err = gorm.Open(postgres.Open(dsn), &gorm.Config{})
+	if err != nil {
+		panic("Failed to connect to database")
+	}
 	if err := db.AutoMigrate(&User{}, &Task{}); err != nil {
-		e.Logger.Fatal(err)
+		panic(err)
 	}
 
-    // ルート設定
+	e := echo.New()
+	e.Use(middleware.CORSWithConfig(middleware.CORSConfig{
+		AllowOrigins: []string{"http://localhost:3000"},
+		AllowMethods: []string{http.MethodGet, http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete},
+		AllowHeaders: []string{"Content-Type", "Authorization"},
+	}))
+
+	// 認証不要
 	e.POST("/api/v1/auth/register", registerUser)
 	e.POST("/api/v1/auth/login", loginUser)
-	// e.GET("/api/v1/tasks", getTasks, middleware.JWTWithConfig(jwtConfig))
-	e.POST("/api/v1/tasks", createTask)
-	e.GET("/api/v1/tasks", getTasks)
-	e.PATCH("/api/v1/tasks/:taskId", updateTaskStatus)
-	e.DELETE("/api/v1/tasks/:taskId", deleteTask) 
 
-    // サーバ起動
-    e.Logger.Fatal(e.Start(":8080"))
+	// 認証必須
+	r := e.Group("/api/v1")
+	r.Use(jwtMiddleware())
+
+	r.GET("/tasks", getTasksMe)
+	r.POST("/tasks", createTask)
+	r.PATCH("/tasks/:taskId", updateTask)
+	r.DELETE("/tasks/:taskId", deleteTask)
+
+	e.Logger.Fatal(e.Start(":8080"))
 }
 
-func hashPassword(password string) (string, error) {
-    bytes, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
-    return string(bytes), err
+func getenv(k, def string) string {
+	if v := os.Getenv(k); v != "" { return v }
+	return def
+}
+
+func hashPassword(pw string) (string, error) {
+	b, err := bcrypt.GenerateFromPassword([]byte(pw), bcrypt.DefaultCost)
+	return string(b), err
+}
+func checkPassword(hash, pw string) error {
+	return bcrypt.CompareHashAndPassword([]byte(hash), []byte(pw))
 }
 
 func registerUser(c echo.Context) error {
-    user := new(User)
-    if err := c.Bind(user); err != nil {
-        return c.JSON(http.StatusBadRequest, map[string]string{"message": "Invalid request"})
-    }
-
-    hashedPassword, err := hashPassword(user.Password)
-    if err != nil {
-        return c.JSON(http.StatusInternalServerError, map[string]string{"message": "Error hashing password"})
-    }
-    user.Password = hashedPassword
-
-    if err := db.Create(user).Error; err != nil {
-        return c.JSON(http.StatusInternalServerError, map[string]string{"message": "Failed to register user"})
-    }
-
-    return c.JSON(http.StatusCreated, map[string]string{"message": "User registered successfully"})
+	u := new(User)
+	if err := c.Bind(u); err != nil || u.Username == "" || u.Password == "" {
+		return c.JSON(http.StatusBadRequest, map[string]string{"message": "Invalid request"})
+	}
+	h, err := hashPassword(u.Password)
+	if err != nil { return c.JSON(http.StatusInternalServerError, map[string]string{"message": "Hash error"}) }
+	u.Password = h
+	if err := db.Create(u).Error; err != nil {
+		return c.JSON(http.StatusConflict, map[string]string{"message": "Username already exists"})
+	}
+	return c.JSON(http.StatusCreated, map[string]any{"message":"User registered","userId":u.ID})
 }
-
 
 func loginUser(c echo.Context) error {
-    // ログイン処理 (JWTトークン発行)
-    return c.JSON(http.StatusOK, map[string]string{"token": "your_jwt_token"})
+	var in struct{ Username, Password string }
+	if err := c.Bind(&in); err != nil {
+		return c.JSON(http.StatusBadRequest, map[string]string{"message": "Invalid request"})
+	}
+	var u User
+	if err := db.Where("username = ?", in.Username).First(&u).Error; err != nil {
+		return c.JSON(http.StatusUnauthorized, map[string]string{"message": "Invalid credentials"})
+	}
+	if err := checkPassword(u.Password, in.Password); err != nil {
+		return c.JSON(http.StatusUnauthorized, map[string]string{"message": "Invalid credentials"})
+	}
+	// JWT発行（1日有効）
+	claims := &Claims{
+		UserID: u.ID,
+		RegisteredClaims: jwt.RegisteredClaims{
+			ExpiresAt: jwt.NewNumericDate(time.Now().Add(24 * time.Hour)),
+			IssuedAt:  jwt.NewNumericDate(time.Now()),
+		},
+	}
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
+	ss, err := token.SignedString(jwtSecret)
+	if err != nil { return c.JSON(http.StatusInternalServerError, map[string]string{"message": "Token error"}) }
+	return c.JSON(http.StatusOK, map[string]string{"token": ss})
 }
 
-func getTasks(c echo.Context) error {
-    var tasks []Task
-    if err := db.Find(&tasks).Error; err != nil {
-        return c.JSON(http.StatusInternalServerError, map[string]string{"message": "Failed to retrieve tasks"})
-    }
+// 認証ミドルウェア
+func jwtMiddleware() echo.MiddlewareFunc {
+	return func(next echo.HandlerFunc) echo.HandlerFunc {
+		return func(c echo.Context) error {
+			auth := c.Request().Header.Get("Authorization")
+			const prefix = "Bearer "
+			if len(auth) <= len(prefix) || auth[:len(prefix)] != prefix {
+				return c.JSON(http.StatusUnauthorized, map[string]string{"message":"Missing token"})
+			}
+			tokStr := auth[len(prefix):]
+			token, err := jwt.ParseWithClaims(tokStr, &Claims{}, func(t *jwt.Token) (interface{}, error) {
+				return jwtSecret, nil
+			})
+			if err != nil || !token.Valid {
+				return c.JSON(http.StatusUnauthorized, map[string]string{"message":"Invalid token"})
+			}
+			claims := token.Claims.(*Claims)
+			// コンテキストにユーザーIDを格納
+			c.Set("uid", claims.UserID)
+			return next(c)
+		}
+	}
+}
 
-    return c.JSON(http.StatusOK, tasks)
+// ログインユーザーのタスク
+func getTasksMe(c echo.Context) error {
+	uid := c.Get("uid").(uint)
+	var tasks []Task
+	if err := db.Where("user_id = ?", uid).Order("id asc").Find(&tasks).Error; err != nil {
+		return c.JSON(http.StatusInternalServerError, map[string]string{"message": "Failed to retrieve tasks"})
+	}
+	return c.JSON(http.StatusOK, tasks)
 }
 
 func createTask(c echo.Context) error {
-	fmt.Println("createTask function called")
-
-    task := new(Task)
-    if err := c.Bind(task); err != nil {
-        return c.JSON(http.StatusBadRequest, map[string]string{"message": "Invalid request"})
-    }
-
-	task.Status = "todo"
-	// ユーザーIDを仮に 1 として設定（本来はJWTから取得する）
-    task.UserID = 1  // 仮のユーザーID
-
-    if err := db.Create(task).Error; err != nil {
-		fmt.Println("Failed to create task:", err)
-        return c.JSON(http.StatusInternalServerError, map[string]string{"message": "Failed to create task"})
-    }
-
-	fmt.Println("Task created successfully:", task) 
-    return c.JSON(http.StatusCreated, task)
+	uid := c.Get("uid").(uint)
+	task := new(Task)
+	if err := c.Bind(task); err != nil || task.Title == "" {
+		return c.JSON(http.StatusBadRequest, map[string]string{"message": "Invalid request"})
+	}
+	task.UserID = uid
+	if task.Status == "" { task.Status = "todo" }
+	if err := db.Create(task).Error; err != nil {
+		return c.JSON(http.StatusInternalServerError, map[string]string{"message": "Failed to create task"})
+	}
+	return c.JSON(http.StatusCreated, task)
 }
 
-func updateTaskStatus(c echo.Context) error {
-    taskID := c.Param("taskId")
+// タイトル/ステータス編集に両対応
+func updateTask(c echo.Context) error {
+	uid := c.Get("uid").(uint)
+	idStr := c.Param("taskId")
+	id, _ := strconv.Atoi(idStr)
 
-    var updatedTask Task
-    if err := c.Bind(&updatedTask); err != nil {
-        return c.JSON(http.StatusBadRequest, map[string]string{"message": "Invalid request"})
-    }
+	var body struct {
+		Title  *string `json:"title"`
+		Status *string `json:"status"`
+		Completed *bool `json:"completed"`
+	}
+	if err := c.Bind(&body); err != nil {
+		return c.JSON(http.StatusBadRequest, map[string]string{"message": "Invalid request"})
+	}
 
-    query := "UPDATE tasks SET status = $1 WHERE id = $2"
-    if err := db.Exec(query, updatedTask.Status, taskID).Error; err != nil {
-        return c.JSON(http.StatusInternalServerError, map[string]string{"message": "Failed to update task status"})
-    }
+	var t Task
+	if err := db.Where("id = ? AND user_id = ?", id, uid).First(&t).Error; err != nil {
+		return c.JSON(http.StatusNotFound, map[string]string{"message": "Task not found"})
+	}
 
-    return c.JSON(http.StatusOK, map[string]string{"message": "Task status updated successfully"})
+	updates := map[string]any{}
+	if body.Title != nil { updates["title"] = *body.Title }
+	if body.Status != nil { updates["status"] = *body.Status }
+	if body.Completed != nil { updates["completed"] = *body.Completed }
+
+	if len(updates) == 0 {
+		return c.JSON(http.StatusBadRequest, map[string]string{"message": "No fields to update"})
+	}
+	if err := db.Model(&t).Updates(updates).Error; err != nil {
+		return c.JSON(http.StatusInternalServerError, map[string]string{"message": "Failed to update task"})
+	}
+	return c.JSON(http.StatusOK, t)
 }
 
 func deleteTask(c echo.Context) error {
-    taskID := c.Param("taskId")
-
-    if err := db.Delete(&Task{}, taskID).Error; err != nil {
-        return c.JSON(http.StatusInternalServerError, map[string]string{"message": "Failed to delete task"})
-    }
-
-    return c.JSON(http.StatusOK, map[string]string{"message": "Task deleted successfully"})
+	uid := c.Get("uid").(uint)
+	idStr := c.Param("taskId")
+	id, _ := strconv.Atoi(idStr)
+	if err := db.Where("id = ? AND user_id = ?", id, uid).Delete(&Task{}).Error; err != nil {
+		return c.JSON(http.StatusInternalServerError, map[string]string{"message": "Failed to delete task"})
+	}
+	return c.JSON(http.StatusOK, map[string]string{"message": "Task deleted"})
 }
-
