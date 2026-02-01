@@ -1,27 +1,33 @@
-# ビルド用のステージ
-FROM node:20-alpine AS builder
+# ===== dev 用 =====
+FROM node:20-alpine AS dev
 WORKDIR /app
 
-# 依存パッケージのインストール
 COPY package*.json ./
 RUN npm install
 
-# アプリケーションのコードをすべてコピー
 COPY . .
+EXPOSE 3000
+CMD ["npm", "run", "dev", "--", "-p", "3000"]
 
-# Next.jsビルド
-RUN npm run build
 
-# 実行環境用
-FROM node:20-alpine
+# ===== build 用 =====
+FROM node:20-alpine AS builder
 WORKDIR /app
 
-# standalone の実行ファイルをコピー
+COPY package*.json ./
+RUN npm install
+
+COPY . .
+RUN npm run build
+
+
+# ===== prod 用（standalone 実行）=====
+FROM node:20-alpine AS prod
+WORKDIR /app
+
 COPY --from=builder /app/.next/standalone ./
 COPY --from=builder /app/public ./public
 COPY --from=builder /app/.next/static ./.next/static
 
 EXPOSE 3000
-
-# Next.jsアプリの起動
 CMD ["node", "server.js"]

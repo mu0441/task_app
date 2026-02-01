@@ -44,12 +44,13 @@ type Claims struct {
 func main() {
 	jwtSecret = []byte(os.Getenv("JWT_SECRET"))
 	dsn := fmt.Sprintf(
-		"host=%s user=%s password=%s dbname=%s port=%s sslmode=disable",
+		"host=%s user=%s password=%s dbname=%s port=%s sslmode=%s",
 		getenv("DB_HOST", "database"),
 		getenv("DB_USER", "postgres"),
 		getenv("DB_PASSWORD", "yourpassword"),
 		getenv("DB_NAME", "taskapp"),
 		getenv("DB_PORT", "5432"),
+		getenv("DB_SSLMODE", "require"),
 	)
 
 	var err error
@@ -61,14 +62,18 @@ func main() {
 		panic(err)
 	}
 
+	corsOrigin := getenv("CORS_ORIGIN", "http://localhost:3000")
 	e := echo.New()
 	e.Use(middleware.CORSWithConfig(middleware.CORSConfig{
-		AllowOrigins: []string{"http://localhost:3000"},
+		AllowOrigins: []string{corsOrigin},
 		AllowMethods: []string{http.MethodGet, http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete},
 		AllowHeaders: []string{"Content-Type", "Authorization"},
 	}))
 
 	// 認証不要
+	e.GET("/health", func(c echo.Context) error {
+		return c.String(http.StatusOK, "ok")
+	})
 	e.POST("/api/v1/auth/register", registerUser)
 	e.POST("/api/v1/auth/login", loginUser)
 
